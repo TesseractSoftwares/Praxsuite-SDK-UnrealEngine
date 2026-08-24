@@ -24,7 +24,7 @@ TEST_SRC := $(wildcard *.cpp)
 
 BIN := prax-tests
 
-.PHONY: all test clean sanitize
+.PHONY: all test clean sanitize sanitize-address sanitize-undefined
 
 all: test
 
@@ -34,14 +34,33 @@ test: $(BIN)
 $(BIN): $(CORE_SRC) $(TEST_SRC)
 	$(CXX) $(CXXFLAGS) $(INC) $^ -o $@
 
-# A second pass under the address and undefined-behaviour sanitizers. The codec does pointer
-# arithmetic over attacker-shaped strings (surrogate escapes, truncated input), so an out-of-bounds
-# read is a realistic bug here and one that -Wall cannot see. Separate target because it is slower
-# and not every compiler ships the runtime.
-sanitize: $(CORE_SRC) $(TEST_SRC)
-	$(CXX) $(CXXFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=all \
-		$(INC) $^ -o $(BIN)-san
-	./$(BIN)-san
+# The sanitizers run as TWO SEPARATE passes, not one combined -fsanitize=address,undefined build.
+#
+# That is not a style preference, it is measured. The combined build segfaulted under Debian's clang
+# before reaching main, while address-only, undefined-only, and no-sanitizer builds of the identical
+# sources all ran the full suite clean. So the fault was in combining the two runtimes, not in the
+# code - and a combined build was never necessary to get the coverage. Two passes exercise both
+# sanitizers and avoid the fragile combination entirely.
+#
+# Why bother at all: the codec does pointer arithmetic over attacker-shaped strings - truncated
+# escapes, unpaired surrogates, deeply nested input - so an out-of-bounds read is a realistic bug
+# here, and it is precisely the class -Wall cannot see.
+#
+# -fno-sanitize-recover=all so UBSan aborts on the first violation rather than printing and carrying
+# on. A warning in a log that still exits 0 is a finding nobody acts on.
+sanitize: sanitize-address sanitize-undefined
+
+sanitize-address: $(CORE_SRC) $(TEST_SRC)
+	@echo "=== ASan pass ==="
+	$(CXX) $(CXXFLAGS) -fsanitize=address -fno-sanitize-recover=all \
+		$(INC) $^ -o $(BIN)-asan
+	./$(BIN)-asan
+
+sanitize-undefined: $(CORE_SRC) $(TEST_SRC)
+	@echo "=== UBSan pass ==="
+	$(CXX) $(CXXFLAGS) -fsanitize=undefined -fno-sanitize-recover=all \
+		$(INC) $^ -o $(BIN)-ubsan
+	./$(BIN)-ubsan
 
 clean:
-	rm -f $(BIN) $(BIN)-san
+	rm -f $(BIN) $(BIN)-asan $(BIN)-ubsan $(BIN)-san

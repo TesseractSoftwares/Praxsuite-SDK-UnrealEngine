@@ -107,7 +107,11 @@ stages:
             cd Tests
             printf 'int main() { return 0; }\n' > asan-probe.cpp
 
-            if ! $(compiler) -fsanitize=address,undefined -o asan-probe asan-probe.cpp 2>&1; then
+            # The probe uses address only, matching how the suite is now built. An earlier version
+            # probed with address,undefined together - a combination measured to segfault before main
+            # under Debian's clang while either sanitizer alone was clean - so the probe was testing
+            # a configuration the Makefile no longer uses.
+            if ! $(compiler) -fsanitize=address -o asan-probe asan-probe.cpp 2>&1; then
               echo "##vso[task.logissue type=warning]$(compiler) cannot link a sanitizer runtime here. Skipping."
               rm -f asan-probe asan-probe.cpp
               exit 0
@@ -144,20 +148,21 @@ stages:
               INC="-I../Source/Praxsuite/Public -I."
               SRC="../Source/Praxsuite/Private/Core/PraxJson.cpp TestJson.cpp TestMain.cpp"
 
-              for MODE in address undefined; do
+              for MODE in address undefined address,undefined; do
+                LABEL=$(echo "$MODE" | tr ',' '-')
                 echo ""
-                echo "--- $MODE only ---"
+                echo "--- $MODE ---"
                 set +e
                 $(compiler) -std=c++17 -O1 -g -fno-omit-frame-pointer \
-                  -fsanitize=$MODE $INC $SRC -o iso-$MODE 2>&1 | tail -5
+                  -fsanitize=$MODE $INC $SRC -o iso-$LABEL 2>&1 | tail -5
                 ASAN_OPTIONS=print_stacktrace=1:handle_segv=1:fast_unwind_on_fatal=0 \
                 UBSAN_OPTIONS=print_stacktrace=1 \
-                  ./iso-$MODE > iso-$MODE.out 2>&1
+                  ./iso-$LABEL > iso-$LABEL.out 2>&1
                 echo "exit $?"
                 echo "last lines of output:"
-                tail -25 iso-$MODE.out
+                tail -25 iso-$LABEL.out
                 set -e
-                rm -f iso-$MODE iso-$MODE.out
+                rm -f iso-$LABEL iso-$LABEL.out
               done
 
               echo ""

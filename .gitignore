@@ -1,0 +1,13 @@
+# Test binaries
+Tests/prax-tests
+Tests/prax-tests-san
+*.o
+
+# Unreal
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+*.sln
+*.suo
+.vs/

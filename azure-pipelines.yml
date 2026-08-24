@@ -1,0 +1,122 @@
+# Praxsuite SDK for Unreal Engine - validate, package, and mirror to GitHub
+#
+# PR and development: validate only.
+# master:             validate, package the plugin, mirror the source to the public GitHub repo, and
+#                     cut a GitHub Release carrying the plugin zip.
+#
+# WHAT THIS PIPELINE CAN AND CANNOT PROVE - worth stating plainly, because the gap is real.
+#
+# It CAN compile and execute the whole portable core - the JSON codec, the PraxQL builder, filters,
+# error classification, key handling and envelope parsing - with an ordinary compiler, warnings as
+# errors, plus a sanitizer pass. That is where every rule in the conformance contract lives, and the
+# contract exists precisely because breaking those rules produces wrong data rather than an error.
+#
+# It CANNOT compile the Unreal-facing layer. An Unreal plugin needs a licensed engine install of
+# around 100 GB, and Epic's container images require account linkage and EULA acceptance, so no
+# hosted or self-hosted agent here can build one. That layer is therefore deliberately as thin as
+# possible - HTTP transport and Blueprint bindings, no logic - and the README says so rather than
+# implying the whole plugin is tested.
+#
+# The honest gate for the engine layer is a human opening the plugin in Unreal once per release.
+
+# There is deliberately no paths: exclude here. Excluding README.md looks like an easy saving, but
+# the mirror-to-GitHub step in this pipeline IS how the public repo gets updated - so a
+# documentation-only change would never reach a single reader.
+trigger:
+  branches:
+    include:
+      - master
+      - development
+
+pr:
+  branches:
+    include:
+      - master
+      - development
+
+pool:
+  name: tesseract-buildpool
+
+variables:
+  isMaster: $[eq(variables['Build.SourceBranch'], 'refs/heads/master')]
+  githubRepo: 'TesseractSoftwares/Praxsuite-SDK-UnrealEngine'
+
+stages:
+
+# ─────────────────────────────────────────────────────────────────────────────
+- stage: Validate
+  displayName: 'Test'
+  jobs:
+    - job: Validate
+      # Two compilers, because they disagree about real things. g++ and clang++ differ on which
+      # narrowing conversions and unhandled switch cases they warn about, and with -Werror a warning
+      # is a failure - so building under both turns "my compiler was quiet" into an actual signal.
+      strategy:
+        matrix:
+          gcc:
+            compiler: 'g++'
+            aptPackage: 'g++'
+          clang:
+            compiler: 'clang++'
+            aptPackage: 'clang'
+      steps:
+        - script: |
+            set -e
+            # The agent image is a slim Debian container, so the toolchain is not present. apt rather
+            # than a pinned download because these are Debian-stable packages: reproducible enough,
+            # and there is no upstream release asset to verify a checksum against.
+            if ! command -v $(compiler) >/dev/null 2>&1; then
+              echo "Installing $(aptPackage)"
+              (sudo apt-get update -qq && sudo apt-get install -y -qq $(aptPackage) make) \
+                || (apt-get update -qq && apt-get install -y -qq $(aptPackage) make)
+            fi
+            $(compiler) --version
+            make --version | head -1
+          displayName: 'Install $(aptPackage)'
+
+        - script: |
+            set -e
+            cd Tests
+            make CXX=$(compiler) test
+          displayName: 'Compile and run the conformance suite'
+
+        # Warnings are already errors, but a clean compile says nothing about out-of-bounds reads.
+        # The codec walks pointers over attacker-shaped strings - truncated escapes, unpaired
+        # surrogates - so ASan/UBSan is the pass that would actually catch a buffer overrun in it.
+        - script: |
+            set -e
+            cd Tests
+            make CXX=$(compiler) clean
+            make CXX=$(compiler) sanitize
+          displayName: 'Re-run under ASan and UBSan'
+
+        # The core must stay free of Unreal. If an engine header or type creeps in, CI silently
+        # stops being able to compile it - and the loss shows up as a disabled test rather than a
+        # failure, which is the sort of erosion nobody notices for months.
+        - script: |
+            set -e
+            if grep -rEn '#include "(CoreMinimal|Engine/|UObject/|HAL/|Containers/)' \
+                 Source/Praxsuite/Public/Core Source/Praxsuite/Private/Core ; then
+              echo "##vso[task.logissue type=error]An Unreal header is included from Core/. The core must stay portable so CI can compile it."
+              exit 1
+            fi
+            if grep -rEn '\b(FString|TArray|TMap|UCLASS|USTRUCT|UFUNCTION|UPROPERTY|UE_LOG|TSharedPtr)\b' \
+                 Source/Praxsuite/Public/Core Source/Praxsuite/Private/Core ; then
+              echo "##vso[task.logissue type=error]An Unreal type appears in Core/. Convert at the engine boundary instead."
+              exit 1
+            fi
+            echo "Core is free of Unreal types."
+          displayName: 'Assert the core stays engine-free'
+
+        # This repo is mirrored to a PUBLIC GitHub repo, so a key committed here reaches every
+        # consumer.
+        - script: |
+            set -e
+            if grep -rEn 'sk_live_[A-Za-z0-9]{16,}' \
+                 --include='*.cpp' --include='*.h' --include='*.cs' --include='*.md' \
+                 --include='*.yml' --include='*.uplugin' --exclude-dir=.git . ; then
+              echo "##vso[task.logissue type=error]A Praxsuite secret key is present. Revoke it now - this repo is mirrored publicly."
+              exit 1
+            fi
+            echo "No secret keys found."
+          displayName: 'Scan for leaked secret keys'

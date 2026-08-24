@@ -83,8 +83,34 @@ stages:
         # Warnings are already errors, but a clean compile says nothing about out-of-bounds reads.
         # The codec walks pointers over attacker-shaped strings - truncated escapes, unpaired
         # surrogates - so ASan/UBSan is the pass that would actually catch a buffer overrun in it.
+        #
+        # The probe first. clang's sanitizer run segfaulted here with ZERO test output even after
+        # stdout was unbuffered, which means it died before main - so the suspect is the sanitizer
+        # runtime, not the code under test. A trivial program settles that in one compile instead of
+        # a morning of reading a JSON parser that gcc's ASan is perfectly happy with.
+        #
+        # The known cause is environmental: recent kernels widened ASLR entropy (vm.mmap_rnd_bits
+        # 28 -> 32) and older ASan runtimes cannot map their shadow memory, dying instantly. The fix
+        # is a sysctl this container is not privileged to set.
+        #
+        # So a broken runtime warns and skips rather than failing the build. Failing would be
+        # dishonest in both directions: it reports a defect in code that has none, and once someone
+        # gets tired of the red they delete the whole step - losing the gcc pass that DOES work.
         - script: |
             set -e
+            PROBE="$(Agent.TempDirectory)/asan-probe"
+            printf 'int main() { return 0; }\n' > "$PROBE.cpp"
+
+            if ! $(compiler) -fsanitize=address,undefined -o "$PROBE" "$PROBE.cpp" 2>&1; then
+              echo "##vso[task.logissue type=warning]$(compiler) cannot link a sanitizer runtime here. Skipping - the other compiler's sanitizer pass still covers this code."
+              exit 0
+            fi
+            if ! "$PROBE"; then
+              echo "##vso[task.logissue type=warning]$(compiler)'s sanitizer runtime cannot START in this container - a program whose entire body is 'return 0' crashes. That is the runtime, not the SDK. Skipping; the other compiler's sanitizer pass covers this code."
+              exit 0
+            fi
+            echo "Sanitizer runtime works. Running the suite under it."
+
             cd Tests
             make CXX=$(compiler) clean
             make CXX=$(compiler) sanitize

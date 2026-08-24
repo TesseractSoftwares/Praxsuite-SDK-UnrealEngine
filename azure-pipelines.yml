@@ -184,6 +184,36 @@ stages:
           displayName: 'Assert the core stays engine-free'
           condition: succeededOrFailed()
 
+        # The Blueprint error enum duplicates the core's, because UENUM cannot wrap a plain C++ enum
+        # from a non-UObject header. A duplicate that drifts is worse than either version alone: the
+        # Unreal layer would map a new code onto whatever enumerator happened to sit at that value,
+        # and report the wrong error confidently.
+        #
+        # The Unreal build catches this too - the conversion switch has no default, so a new core code
+        # produces an unhandled-case warning - but CI cannot compile the Unreal layer, so that check
+        # never runs here. This one does.
+        - script: |
+            set -e
+            CORE=$(grep -cE '^\s+[A-Z][A-Za-z]*,\s*$' Source/Praxsuite/Public/Core/PraxError.h || true)
+            BP=$(grep -cE '^\s+[A-Z][A-Za-z]*\s+UMETA' Source/Praxsuite/Public/PraxsuiteTypes.h || true)
+
+            echo "core enumerators:      $CORE"
+            echo "blueprint enumerators: $BP"
+
+            if [ "$CORE" -eq 0 ] || [ "$BP" -eq 0 ]; then
+              # Counting nothing and calling it a match is how a gate stops working without failing.
+              echo "##vso[task.logissue type=error]The enum drift check counted zero enumerators on one side, so it is not measuring anything. Fix the patterns rather than trusting the result."
+              exit 1
+            fi
+
+            if [ "$CORE" -ne "$BP" ]; then
+              echo "##vso[task.logissue type=error]EPraxErrorCode has $CORE values but EPraxError has $BP. Add the missing one to both, and to PraxConvert::ToBlueprintError."
+              exit 1
+            fi
+            echo "The two error enums agree."
+          displayName: 'Assert the error enums have not drifted'
+          condition: succeededOrFailed()
+
         # This repo is mirrored to a PUBLIC GitHub repo, so a key committed here reaches every
         # consumer.
         - script: |

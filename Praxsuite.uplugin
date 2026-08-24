@@ -1,0 +1,32 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0.0",
+	"FriendlyName": "Praxsuite",
+	"Description": "Backend for your Unreal game - player accounts, saves, leaderboards, inventories and server-authoritative logic. Blueprint and C++.",
+	"Category": "Online Platform",
+	"CreatedBy": "Tesseract Softwares SpA",
+	"CreatedByURL": "https://praxsuite.com",
+	"DocsURL": "https://github.com/TesseractSoftwares/Praxsuite-SDK-UnrealEngine",
+	"MarketplaceURL": "",
+	"SupportURL": "https://github.com/TesseractSoftwares/Praxsuite-SDK-UnrealEngine/issues",
+	"EngineVersion": "5.3.0",
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "Praxsuite",
+			"Type": "Runtime",
+			"LoadingPhase": "PreDefault",
+			"WhitelistPlatforms": [
+				"Win64",
+				"Mac",
+				"Linux",
+				"Android",
+				"IOS"
+			]
+		}
+	]
+}

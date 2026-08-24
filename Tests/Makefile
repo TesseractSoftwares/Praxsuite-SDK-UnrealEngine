@@ -24,7 +24,7 @@ TEST_SRC := $(wildcard *.cpp)
 
 BIN := prax-tests
 
-.PHONY: all test clean sanitize sanitize-address sanitize-undefined
+.PHONY: all test clean sanitize sanitize-address sanitize-undefined build-address build-undefined
 
 all: test
 
@@ -50,16 +50,26 @@ $(BIN): $(CORE_SRC) $(TEST_SRC)
 # on. A warning in a log that still exits 0 is a finding nobody acts on.
 sanitize: sanitize-address sanitize-undefined
 
-sanitize-address: $(CORE_SRC) $(TEST_SRC)
+# Build-only targets, separate from the run, so CI can run the binary itself with retries and
+# inspect its output. That distinction matters here: clang's ASan runtime in the CI container
+# INTERMITTENTLY fails to map its shadow memory and dies before main, and telling that apart from a
+# genuine finding requires looking at whether the suite produced any output at all - which `make`
+# running the binary for you cannot do.
+$(BIN)-asan: $(CORE_SRC) $(TEST_SRC)
+	$(CXX) $(CXXFLAGS) -fsanitize=address -fno-sanitize-recover=all $(INC) $^ -o $@
+
+$(BIN)-ubsan: $(CORE_SRC) $(TEST_SRC)
+	$(CXX) $(CXXFLAGS) -fsanitize=undefined -fno-sanitize-recover=all $(INC) $^ -o $@
+
+build-address: $(BIN)-asan
+build-undefined: $(BIN)-ubsan
+
+sanitize-address: $(BIN)-asan
 	@echo "=== ASan pass ==="
-	$(CXX) $(CXXFLAGS) -fsanitize=address -fno-sanitize-recover=all \
-		$(INC) $^ -o $(BIN)-asan
 	./$(BIN)-asan
 
-sanitize-undefined: $(CORE_SRC) $(TEST_SRC)
+sanitize-undefined: $(BIN)-ubsan
 	@echo "=== UBSan pass ==="
-	$(CXX) $(CXXFLAGS) -fsanitize=undefined -fno-sanitize-recover=all \
-		$(INC) $^ -o $(BIN)-ubsan
 	./$(BIN)-ubsan
 
 clean:

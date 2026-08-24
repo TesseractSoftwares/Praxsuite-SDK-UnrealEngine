@@ -80,117 +80,81 @@ stages:
             make CXX=$(compiler) test
           displayName: 'Compile and run the conformance suite'
 
-        # Warnings are already errors, but a clean compile says nothing about out-of-bounds reads.
-        # The codec walks pointers over attacker-shaped strings - truncated escapes, unpaired
-        # surrogates - so ASan/UBSan is the pass that would actually catch a buffer overrun in it.
+        # ASan and UBSan run as two separate passes, and each one is RUN here rather than by make, so
+        # this step can tell two very different things apart.
         #
-        # The probe first. clang's sanitizer run segfaulted here with ZERO test output even after
-        # stdout was unbuffered, which means it died before main - so the suspect is the sanitizer
-        # runtime, not the code under test. A trivial program settles that in one compile instead of
-        # a morning of reading a JSON parser that gcc's ASan is perfectly happy with.
+        # Measured, over several builds of identical sources: clang's sanitizer binaries in this
+        # container sometimes segfault BEFORE main, producing not one line of output, and sometimes
+        # run the whole suite clean. It is intermittent - the known cause is that recent kernels
+        # widened ASLR entropy (vm.mmap_rnd_bits 28 -> 32) and older ASan runtimes then fail to map
+        # their shadow memory, which succeeds or fails depending on the randomised layout. The fix is
+        # a sysctl this container is not privileged to set.
         #
-        # The known cause is environmental: recent kernels widened ASLR entropy (vm.mmap_rnd_bits
-        # 28 -> 32) and older ASan runtimes cannot map their shadow memory, dying instantly. The fix
-        # is a sysctl this container is not privileged to set.
+        # I previously concluded the ASan+UBSan COMBINATION was the cause, on the evidence that
+        # address-only and undefined-only both passed while combined crashed. That was wrong:
+        # address-only has since crashed too. Separate passes are still the better arrangement, but
+        # they are not a fix for this.
         #
-        # So a broken runtime warns and skips rather than failing the build. Failing would be
-        # dishonest in both directions: it reports a defect in code that has none, and once someone
-        # gets tired of the red they delete the whole step - losing the gcc pass that DOES work.
+        # So the distinction that matters is not which sanitizer - it is whether the suite RAN. A
+        # binary that dies before printing a single section never executed a line of the SDK, and
+        # calling that a defect would be false. A binary that fails partway through printed sections
+        # first, and that IS a finding. The test output is the evidence, so this looks at it:
+        #
+        #   exit 0                          -> pass
+        #   non-zero, with test output      -> a real failure, fail the build
+        #   non-zero, with NO test output   -> the runtime never started, retry, then warn and skip
+        #
+        # Retrying is legitimate precisely because the failure is random rather than conditional. It
+        # is bounded at three attempts so a genuinely broken runtime does not loop.
         - script: |
             set -e
-            # The probe lives in Tests/, NOT the agent temp directory. The first version built it
-            # under $(Agent.TempDirectory) and reported BOTH compilers' runtimes as broken - while
-            # gcc's sanitizer pass had demonstrably run the whole suite two builds earlier. The temp
-            # mount is very likely noexec, so what the probe actually measured was its own inability
-            # to execute anything, and it turned the build green by skipping work that was passing.
-            # A gate that reports success by not running is worse than no gate.
             cd Tests
-            printf 'int main() { return 0; }\n' > asan-probe.cpp
 
-            # The probe uses address only, matching how the suite is now built. An earlier version
-            # probed with address,undefined together - a combination measured to segfault before main
-            # under Debian's clang while either sanitizer alone was clean - so the probe was testing
-            # a configuration the Makefile no longer uses.
-            if ! $(compiler) -fsanitize=address -o asan-probe asan-probe.cpp 2>&1; then
-              echo "##vso[task.logissue type=warning]$(compiler) cannot link a sanitizer runtime here. Skipping."
-              rm -f asan-probe asan-probe.cpp
-              exit 0
-            fi
-
-            # The exit code is the whole point, so capture it rather than testing truthiness. 126 and
-            # 127 mean the shell could not execute the file - a filesystem or linker problem that
-            # says nothing about the sanitizer. Above 128 is a fatal signal, which IS the runtime
-            # failing to start. Conflating those two is what produced the wrong diagnosis.
-            set +e
-            ./asan-probe
-            PROBE_STATUS=$?
-            set -e
-            rm -f asan-probe asan-probe.cpp
-            echo "Sanitizer probe exited $PROBE_STATUS"
-
-            if [ "$PROBE_STATUS" -eq 0 ]; then
-              echo "Sanitizer runtime works. Running the suite under it."
-              make CXX=$(compiler) clean
-              set +e
-              make CXX=$(compiler) sanitize
-              SAN_STATUS=$?
-              set -e
-              if [ "$SAN_STATUS" -eq 0 ]; then
-                exit 0
-              fi
-
-              # The combined pass failed on a runtime whose probe was fine, so the fault is in the
-              # code or in one specific sanitizer. Isolating which, here, beats guessing: the
-              # combined build gives one bit of information and a refactor based on it might "fix"
-              # something that was never broken.
+            run_sanitizer() {
+              MODE="$1"
+              BINARY="$2"
               echo ""
-              echo "===== the combined pass failed - isolating ====="
-              INC="-I../Source/Praxsuite/Public -I."
-              SRC="../Source/Praxsuite/Private/Core/PraxJson.cpp TestJson.cpp TestMain.cpp"
+              echo "===== $MODE ====="
+              make CXX=$(compiler) "build-$MODE"
 
-              for MODE in address undefined address,undefined; do
-                LABEL=$(echo "$MODE" | tr ',' '-')
-                echo ""
-                echo "--- $MODE ---"
+              ATTEMPT=1
+              while [ "$ATTEMPT" -le 3 ]; do
                 set +e
-                $(compiler) -std=c++17 -O1 -g -fno-omit-frame-pointer \
-                  -fsanitize=$MODE $INC $SRC -o iso-$LABEL 2>&1 | tail -5
-                ASAN_OPTIONS=print_stacktrace=1:handle_segv=1:fast_unwind_on_fatal=0 \
-                UBSAN_OPTIONS=print_stacktrace=1 \
-                  ./iso-$LABEL > iso-$LABEL.out 2>&1
-                echo "exit $?"
-                echo "last lines of output:"
-                tail -25 iso-$LABEL.out
+                "$BINARY" > san-out.txt 2>&1
+                STATUS=$?
                 set -e
-                rm -f iso-$LABEL iso-$LABEL.out
+
+                if [ "$STATUS" -eq 0 ]; then
+                  tail -5 san-out.txt
+                  echo "$MODE: passed"
+                  rm -f san-out.txt
+                  return 0
+                fi
+
+                # "-- " prefixes every section heading the harness prints. Its presence means the
+                # binary got as far as executing tests, so a failure is the SDK's, not the runtime's.
+                if grep -q '^-- ' san-out.txt; then
+                  echo "--- full output ---"
+                  cat san-out.txt
+                  echo "##vso[task.logissue type=error]$MODE failed DURING the suite. The binary ran and produced output, so this is a real finding, not a broken sanitizer runtime."
+                  rm -f san-out.txt
+                  return 1
+                fi
+
+                echo "attempt $ATTEMPT: exit $STATUS with no test output at all - the runtime did not start"
+                sed -n '1,10p' san-out.txt
+                ATTEMPT=$((ATTEMPT + 1))
               done
 
-              echo ""
-              echo "--- no sanitizer, same flags (does it crash without them?) ---"
-              set +e
-              $(compiler) -std=c++17 -O1 -g -fno-omit-frame-pointer $INC $SRC -o iso-none 2>&1 | tail -3
-              ./iso-none > iso-none.out 2>&1
-              echo "exit $?"
-              tail -5 iso-none.out
-              set -e
-              rm -f iso-none iso-none.out
+              rm -f san-out.txt
+              echo "##vso[task.logissue type=warning]$MODE never started under $(compiler) after 3 attempts - it dies before main, so no SDK code ran. This is the known ASLR/shadow-mapping failure, not a defect. The other compiler's pass covers this code."
+              return 0
+            }
 
-              echo "##vso[task.logissue type=error]The suite crashes under $(compiler)'s sanitizers. See the isolation output above for which one and where."
-              exit 1
-            fi
-
-            if [ "$PROBE_STATUS" -ge 128 ]; then
-              # Known cause: recent kernels widened ASLR entropy (vm.mmap_rnd_bits 28 -> 32) and
-              # older ASan runtimes cannot map their shadow memory, dying on signal. The fix is a
-              # sysctl this container is not privileged to set. Warn rather than fail: failing
-              # reports a defect in code that has none, and once someone tires of the red they
-              # delete the step and lose the pass entirely.
-              echo "##vso[task.logissue type=warning]$(compiler)'s sanitizer runtime died on a signal (exit $PROBE_STATUS) running a program whose entire body is 'return 0'. That is the runtime, not the SDK. Skipping."
-              exit 0
-            fi
-
-            echo "##vso[task.logissue type=error]The sanitizer probe exited $PROBE_STATUS, which is neither success nor a fatal signal. That is not a known-bad runtime - do not assume it is harmless."
-            exit 1
+            FAILED=0
+            run_sanitizer address "./prax-tests-asan" || FAILED=1
+            run_sanitizer undefined "./prax-tests-ubsan" || FAILED=1
+            exit "$FAILED"
           displayName: 'Re-run under ASan and UBSan'
 
         # The core must stay free of Unreal. If an engine header or type creeps in, CI silently

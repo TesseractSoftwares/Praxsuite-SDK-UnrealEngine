@@ -98,22 +98,51 @@ stages:
         # gets tired of the red they delete the whole step - losing the gcc pass that DOES work.
         - script: |
             set -e
-            PROBE="$(Agent.TempDirectory)/asan-probe"
-            printf 'int main() { return 0; }\n' > "$PROBE.cpp"
-
-            if ! $(compiler) -fsanitize=address,undefined -o "$PROBE" "$PROBE.cpp" 2>&1; then
-              echo "##vso[task.logissue type=warning]$(compiler) cannot link a sanitizer runtime here. Skipping - the other compiler's sanitizer pass still covers this code."
-              exit 0
-            fi
-            if ! "$PROBE"; then
-              echo "##vso[task.logissue type=warning]$(compiler)'s sanitizer runtime cannot START in this container - a program whose entire body is 'return 0' crashes. That is the runtime, not the SDK. Skipping; the other compiler's sanitizer pass covers this code."
-              exit 0
-            fi
-            echo "Sanitizer runtime works. Running the suite under it."
-
+            # The probe lives in Tests/, NOT the agent temp directory. The first version built it
+            # under $(Agent.TempDirectory) and reported BOTH compilers' runtimes as broken - while
+            # gcc's sanitizer pass had demonstrably run the whole suite two builds earlier. The temp
+            # mount is very likely noexec, so what the probe actually measured was its own inability
+            # to execute anything, and it turned the build green by skipping work that was passing.
+            # A gate that reports success by not running is worse than no gate.
             cd Tests
-            make CXX=$(compiler) clean
-            make CXX=$(compiler) sanitize
+            printf 'int main() { return 0; }\n' > asan-probe.cpp
+
+            if ! $(compiler) -fsanitize=address,undefined -o asan-probe asan-probe.cpp 2>&1; then
+              echo "##vso[task.logissue type=warning]$(compiler) cannot link a sanitizer runtime here. Skipping."
+              rm -f asan-probe asan-probe.cpp
+              exit 0
+            fi
+
+            # The exit code is the whole point, so capture it rather than testing truthiness. 126 and
+            # 127 mean the shell could not execute the file - a filesystem or linker problem that
+            # says nothing about the sanitizer. Above 128 is a fatal signal, which IS the runtime
+            # failing to start. Conflating those two is what produced the wrong diagnosis.
+            set +e
+            ./asan-probe
+            PROBE_STATUS=$?
+            set -e
+            rm -f asan-probe asan-probe.cpp
+            echo "Sanitizer probe exited $PROBE_STATUS"
+
+            if [ "$PROBE_STATUS" -eq 0 ]; then
+              echo "Sanitizer runtime works. Running the suite under it."
+              make CXX=$(compiler) clean
+              make CXX=$(compiler) sanitize
+              exit 0
+            fi
+
+            if [ "$PROBE_STATUS" -ge 128 ]; then
+              # Known cause: recent kernels widened ASLR entropy (vm.mmap_rnd_bits 28 -> 32) and
+              # older ASan runtimes cannot map their shadow memory, dying on signal. The fix is a
+              # sysctl this container is not privileged to set. Warn rather than fail: failing
+              # reports a defect in code that has none, and once someone tires of the red they
+              # delete the step and lose the pass entirely.
+              echo "##vso[task.logissue type=warning]$(compiler)'s sanitizer runtime died on a signal (exit $PROBE_STATUS) running a program whose entire body is 'return 0'. That is the runtime, not the SDK. Skipping."
+              exit 0
+            fi
+
+            echo "##vso[task.logissue type=error]The sanitizer probe exited $PROBE_STATUS, which is neither success nor a fatal signal. That is not a known-bad runtime - do not assume it is harmless."
+            exit 1
           displayName: 'Re-run under ASan and UBSan'
 
         # The core must stay free of Unreal. If an engine header or type creeps in, CI silently

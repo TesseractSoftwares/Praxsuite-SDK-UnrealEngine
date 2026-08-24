@@ -10,6 +10,10 @@
 #include "PraxTestHarness.h"
 
 void TestJson();
+void TestErrors();
+void TestKeyGuard();
+void TestRoutes();
+void TestEnvelopes();
 
 int main()
 {
@@ -23,6 +27,10 @@ int main()
 	std::printf("================================================\n");
 
 	TestJson();
+	TestErrors();
+	TestKeyGuard();
+	TestRoutes();
+	TestEnvelopes();
 
 	return PraxTest::Report();
 }

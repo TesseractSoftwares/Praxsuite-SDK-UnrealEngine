@@ -13,6 +13,12 @@ void TestJson();
 
 int main()
 {
+	// Unbuffered, deliberately. stdout to a CI log is a pipe, so it is block-buffered, and a crash
+	// discards whatever had not been flushed - which produced a first sanitizer run reporting only
+	// "Segmentation fault" with not one line of test output to say where it got to. Losing the
+	// evidence of a crash is worse than the crash.
+	std::setvbuf(stdout, nullptr, _IONBF, 0);
+
 	std::printf("Praxsuite SDK for Unreal - offline conformance suite\n");
 	std::printf("================================================\n");
 

@@ -95,18 +95,27 @@ stages:
         # failure, which is the sort of erosion nobody notices for months.
         - script: |
             set -e
-            if grep -rEn '#include "(CoreMinimal|Engine/|UObject/|HAL/|Containers/)' \
-                 Source/Praxsuite/Public/Core Source/Praxsuite/Private/Core ; then
+            # Comments are stripped before matching. The first version of this gate failed on Core/'s
+            # own header comment, which EXPLAINS why FString and TArray are absent - a gate that
+            # cannot tell code from prose about the code fires on the documentation of the rule it
+            # enforces, and the obvious fix is to stop writing the explanation down.
+            SCAN=$(mktemp -d)
+            for F in $(find Source/Praxsuite/Public/Core Source/Praxsuite/Private/Core -type f \( -name '*.h' -o -name '*.cpp' \)); do
+              sed -e 's://.*::' "$F" > "$SCAN/$(echo "$F" | tr '/' '_')"
+            done
+
+            if grep -rEn '#include[[:space:]]*"(CoreMinimal|Engine/|UObject/|HAL/|Containers/)' "$SCAN" ; then
               echo "##vso[task.logissue type=error]An Unreal header is included from Core/. The core must stay portable so CI can compile it."
               exit 1
             fi
-            if grep -rEn '\b(FString|TArray|TMap|UCLASS|USTRUCT|UFUNCTION|UPROPERTY|UE_LOG|TSharedPtr)\b' \
-                 Source/Praxsuite/Public/Core Source/Praxsuite/Private/Core ; then
+            if grep -rEn '\b(FString|TArray|TMap|UCLASS|USTRUCT|UFUNCTION|UPROPERTY|UE_LOG|TSharedPtr|TSharedRef)\b' "$SCAN" ; then
               echo "##vso[task.logissue type=error]An Unreal type appears in Core/. Convert at the engine boundary instead."
               exit 1
             fi
+            rm -rf "$SCAN"
             echo "Core is free of Unreal types."
           displayName: 'Assert the core stays engine-free'
+          condition: succeededOrFailed()
 
         # This repo is mirrored to a PUBLIC GitHub repo, so a key committed here reaches every
         # consumer.
@@ -120,3 +129,4 @@ stages:
             fi
             echo "No secret keys found."
           displayName: 'Scan for leaked secret keys'
+          condition: succeededOrFailed()

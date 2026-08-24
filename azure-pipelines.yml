@@ -127,8 +127,51 @@ stages:
             if [ "$PROBE_STATUS" -eq 0 ]; then
               echo "Sanitizer runtime works. Running the suite under it."
               make CXX=$(compiler) clean
+              set +e
               make CXX=$(compiler) sanitize
-              exit 0
+              SAN_STATUS=$?
+              set -e
+              if [ "$SAN_STATUS" -eq 0 ]; then
+                exit 0
+              fi
+
+              # The combined pass failed on a runtime whose probe was fine, so the fault is in the
+              # code or in one specific sanitizer. Isolating which, here, beats guessing: the
+              # combined build gives one bit of information and a refactor based on it might "fix"
+              # something that was never broken.
+              echo ""
+              echo "===== the combined pass failed - isolating ====="
+              INC="-I../Source/Praxsuite/Public -I."
+              SRC="../Source/Praxsuite/Private/Core/PraxJson.cpp TestJson.cpp TestMain.cpp"
+
+              for MODE in address undefined; do
+                echo ""
+                echo "--- $MODE only ---"
+                set +e
+                $(compiler) -std=c++17 -O1 -g -fno-omit-frame-pointer \
+                  -fsanitize=$MODE $INC $SRC -o iso-$MODE 2>&1 | tail -5
+                ASAN_OPTIONS=print_stacktrace=1:handle_segv=1:fast_unwind_on_fatal=0 \
+                UBSAN_OPTIONS=print_stacktrace=1 \
+                  ./iso-$MODE > iso-$MODE.out 2>&1
+                echo "exit $?"
+                echo "last lines of output:"
+                tail -25 iso-$MODE.out
+                set -e
+                rm -f iso-$MODE iso-$MODE.out
+              done
+
+              echo ""
+              echo "--- no sanitizer, same flags (does it crash without them?) ---"
+              set +e
+              $(compiler) -std=c++17 -O1 -g -fno-omit-frame-pointer $INC $SRC -o iso-none 2>&1 | tail -3
+              ./iso-none > iso-none.out 2>&1
+              echo "exit $?"
+              tail -5 iso-none.out
+              set -e
+              rm -f iso-none iso-none.out
+
+              echo "##vso[task.logissue type=error]The suite crashes under $(compiler)'s sanitizers. See the isolation output above for which one and where."
+              exit 1
             fi
 
             if [ "$PROBE_STATUS" -ge 128 ]; then

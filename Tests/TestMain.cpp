@@ -14,6 +14,9 @@ void TestErrors();
 void TestKeyGuard();
 void TestRoutes();
 void TestEnvelopes();
+void TestFilters();
+void TestQueryBuilder();
+void TestMutations();
 
 int main()
 {
@@ -31,6 +34,9 @@ int main()
 	TestKeyGuard();
 	TestRoutes();
 	TestEnvelopes();
+	TestFilters();
+	TestQueryBuilder();
+	TestMutations();
 
 	return PraxTest::Report();
 }

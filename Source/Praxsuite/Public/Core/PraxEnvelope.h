@@ -6,9 +6,9 @@
 // mis-parses two of them:
 //
 //   POST /{ws}/query        the body IS the result. {"data":[...],"meta":{...}}. Nothing to unwrap.
-//   POST /{ws}/auth/*       a platform envelope. The payload is under .data, alongside isSuccess,
+//   POST /{ws}/auth/{action} a platform envelope. The payload is under .data, alongside isSuccess,
 //                           message, errors and statusCode.
-//   /{ws}/files/*           errors are a BARE STRING: {"error":"..."} rather than an object.
+//   /{ws}/files/{action}     errors are a BARE STRING: {"error":"..."} rather than an object.
 //
 // And a fourth case that is not an envelope at all:
 //
@@ -68,7 +68,11 @@ namespace Prax
 		bool ReadQuery(int Status, const FJsonValue& Body, FPraxPage& OutPage, FPraxError& OutError);
 
 		/**
-		 * Reads an /auth/* response, returning the payload from under .data.
+		 * Reads an /auth/{action} response, returning the payload from under .data.
+		 *
+		 * (Written with the action spelled out rather than a wildcard because a wildcard after a
+		 * slash is the two characters that open a block comment, which -Wcomment treats as an error
+		 * and -Werror then turns into a failed build.)
 		 *
 		 * This is the ONE route family whose payload is nested. Applying it elsewhere is the bug
 		 * described at the top of this file.

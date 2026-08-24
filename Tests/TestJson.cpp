@@ -122,6 +122,60 @@ void TestJson()
 
 		PRAX_STR_EQ(FJsonValue::Object().ToString(), "{}", "an empty object is {}");
 		PRAX_STR_EQ(FJsonValue::Array().ToString(), "[]", "an empty array is []");
+		PRAX_CHECK(FJsonValue::Object().IsObject(), "an empty object is still an object");
+		PRAX_CHECK(!FJsonValue::Object().IsArray(), "and is not an array");
+	}
+
+	PraxTest::Section("JSON codec - object storage is a sorted vector, not a map");
+	{
+		// Objects used to be a std::map member, which is undefined behaviour: only vector, list and
+		// forward_list may be instantiated with an incomplete type, and FJsonValue is incomplete
+		// inside its own definition. libstdc++ tolerated it; MSVC - the compiler Unreal actually
+		// uses on Windows - is far less forgiving, so it was a build failure in the one environment
+		// CI cannot reach. Storage is a sorted vector of members now, and these pin the behaviour
+		// that change had to preserve.
+		FJsonValue Value = FJsonValue::Object();
+		Value.SetField("zebra", FJsonValue(1));
+		Value.SetField("alpha", FJsonValue(2));
+		Value.SetField("middle", FJsonValue(3));
+
+		PRAX_STR_EQ(Value.ToString(), "{\"alpha\":2,\"middle\":3,\"zebra\":1}",
+					"keys serialise in sorted order regardless of insertion order");
+
+		// Sorted order is what makes serialisation deterministic, which is what lets every other
+		// assertion here compare an exact string instead of hunting substrings.
+		const auto& Members = Value.AsObject();
+		PRAX_EQ(static_cast<long long>(Members.size()), 3LL, "three members stored");
+		PRAX_STR_EQ(Members[0].Key, "alpha", "first member is the lowest key");
+		PRAX_STR_EQ(Members[2].Key, "zebra", "last member is the highest key");
+
+		// Setting an existing key must REPLACE it, which is what the map did. Appending instead
+		// would emit a duplicate key - valid JSON that the gateway reads unpredictably.
+		Value.SetField("alpha", FJsonValue(99));
+		PRAX_EQ(static_cast<long long>(Value.AsObject().size()), 3LL,
+				"re-setting a key does not add a second copy");
+		PRAX_EQ(Value.Field("alpha").AsInt(), 99LL, "and the new value wins");
+
+		// The same rule applies to duplicate keys arriving over the wire: last one wins.
+		FJsonValue Parsed;
+		std::string Error;
+		PRAX_CHECK(FJsonValue::Parse("{\"a\":1,\"a\":2}", Parsed, Error), "a duplicate key parses");
+		PRAX_EQ(static_cast<long long>(Parsed.AsObject().size()), 1LL, "and collapses to one member");
+		PRAX_EQ(Parsed.Field("a").AsInt(), 2LL, "with the last value winning");
+
+		// Lookup is a binary search over that vector, so a miss must not land on a neighbour.
+		PRAX_CHECK(Value.Field("alph").IsNull(), "a key that is a prefix of a real one misses");
+		PRAX_CHECK(Value.Field("alphaa").IsNull(), "a key that extends a real one misses");
+		PRAX_CHECK(Value.Field("").IsNull(), "an empty key misses");
+		PRAX_CHECK(!Value.HasField("zebrb"), "HasField agrees with Field on a near miss");
+
+		// A value equal by content must compare equal whatever order it was built in, because
+		// element-wise vector comparison is only order-independent while the sort holds.
+		FJsonValue Other = FJsonValue::Object();
+		Other.SetField("middle", FJsonValue(3));
+		Other.SetField("zebra", FJsonValue(1));
+		Other.SetField("alpha", FJsonValue(99));
+		PRAX_CHECK(Value == Other, "two objects built in different orders compare equal");
 	}
 
 	PraxTest::Section("JSON codec - round trips");

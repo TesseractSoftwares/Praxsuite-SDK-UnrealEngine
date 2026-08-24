@@ -1,5 +1,7 @@
 #include "Core/PraxJson.h"
 
+#include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -8,10 +10,29 @@ namespace Prax
 {
 	namespace
 	{
-		const FJsonValue NullValue{};
 		const std::string EmptyString{};
 		const FJsonArray EmptyArray{};
-		const FJsonObjectMap EmptyObject{};
+		const std::vector<FJsonMember> EmptyMembers{};
+
+		/**
+		 * The null returned by Field() for an absent key.
+		 *
+		 * A function-local static rather than a namespace-scope object: FJsonValue's constructor is
+		 * out of line now, so a namespace-scope instance would depend on initialisation order across
+		 * translation units. Function-local statics are initialised on first use, which removes the
+		 * question. It is const and never written, so the thread-safe-init guard costs nothing that
+		 * matters.
+		 */
+		const FJsonValue& NullValue()
+		{
+			static const FJsonValue Instance;
+			return Instance;
+		}
+
+		bool MemberLess(const FJsonMember& Member, const std::string& Key)
+		{
+			return Member.Key < Key;
+		}
 
 		/** Appends a code point as UTF-8. */
 		void AppendUtf8(std::string& Out, uint32_t CodePoint)
@@ -22,21 +43,21 @@ namespace Prax
 			}
 			else if (CodePoint <= 0x7FF)
 			{
-				Out.push_back(static_cast<char>(0xC0 | (CodePoint >> 6)));
-				Out.push_back(static_cast<char>(0x80 | (CodePoint & 0x3F)));
+				Out.push_back(static_cast<char>(0xC0u | (CodePoint >> 6)));
+				Out.push_back(static_cast<char>(0x80u | (CodePoint & 0x3Fu)));
 			}
 			else if (CodePoint <= 0xFFFF)
 			{
-				Out.push_back(static_cast<char>(0xE0 | (CodePoint >> 12)));
-				Out.push_back(static_cast<char>(0x80 | ((CodePoint >> 6) & 0x3F)));
-				Out.push_back(static_cast<char>(0x80 | (CodePoint & 0x3F)));
+				Out.push_back(static_cast<char>(0xE0u | (CodePoint >> 12)));
+				Out.push_back(static_cast<char>(0x80u | ((CodePoint >> 6) & 0x3Fu)));
+				Out.push_back(static_cast<char>(0x80u | (CodePoint & 0x3Fu)));
 			}
 			else
 			{
-				Out.push_back(static_cast<char>(0xF0 | (CodePoint >> 18)));
-				Out.push_back(static_cast<char>(0x80 | ((CodePoint >> 12) & 0x3F)));
-				Out.push_back(static_cast<char>(0x80 | ((CodePoint >> 6) & 0x3F)));
-				Out.push_back(static_cast<char>(0x80 | (CodePoint & 0x3F)));
+				Out.push_back(static_cast<char>(0xF0u | (CodePoint >> 18)));
+				Out.push_back(static_cast<char>(0x80u | ((CodePoint >> 12) & 0x3Fu)));
+				Out.push_back(static_cast<char>(0x80u | ((CodePoint >> 6) & 0x3Fu)));
+				Out.push_back(static_cast<char>(0x80u | (CodePoint & 0x3Fu)));
 			}
 		}
 
@@ -90,7 +111,7 @@ namespace Prax
 			{
 				// A bound on nesting rather than unbounded recursion: this parses network input, and
 				// a deeply nested body would otherwise be a stack overflow rather than an error.
-				if (Depth > 128)
+				if (Depth > 64)
 				{
 					return Fail("JSON nested too deeply");
 				}
@@ -313,12 +334,12 @@ namespace Prax
 			bool ParseObject(FJsonValue& Out, int Depth)
 			{
 				++Pos; // '{'
-				FJsonObjectMap Fields;
+				FJsonValue Result = FJsonValue::Object();
 				SkipWhitespace();
 				if (Pos < Text.size() && Text[Pos] == '}')
 				{
 					++Pos;
-					Out = FJsonValue(std::move(Fields));
+					Out = std::move(Result);
 					return true;
 				}
 				while (true)
@@ -341,7 +362,9 @@ namespace Prax
 					{
 						return false;
 					}
-					Fields[std::move(Key)] = std::move(Value);
+					// SetField keeps members sorted and replaces a duplicate key, which is what a
+					// map would have done - last one wins.
+					Result.SetField(Key, std::move(Value));
 
 					SkipWhitespace();
 					if (Pos >= Text.size())
@@ -352,7 +375,7 @@ namespace Prax
 					if (Text[Pos] == '}') { ++Pos; break; }
 					return Fail("expected ',' or '}'");
 				}
-				Out = FJsonValue(std::move(Fields));
+				Out = std::move(Result);
 				return true;
 			}
 		};
@@ -378,8 +401,8 @@ namespace Prax
 			default:
 				if (C < 0x20)
 				{
-					char Buffer[7];
-					std::snprintf(Buffer, sizeof(Buffer), "\\u%04x", C);
+					char Buffer[8];
+					std::snprintf(Buffer, sizeof(Buffer), "\\u%04x", static_cast<unsigned>(C));
 					Out += Buffer;
 				}
 				else
@@ -394,6 +417,46 @@ namespace Prax
 		}
 		Out.push_back('"');
 		return Out;
+	}
+
+	// Constructors are out of line because FJsonMember is incomplete inside the class definition,
+	// so anything that touches std::vector<FJsonMember>'s operations has to live here.
+	FJsonValue::FJsonValue() : Type(EType::Null) {}
+	FJsonValue::FJsonValue(std::nullptr_t) : Type(EType::Null) {}
+	FJsonValue::FJsonValue(bool In) : Type(EType::Bool), BoolValue(In) {}
+	FJsonValue::FJsonValue(int32_t In) : Type(EType::Int), IntValue(In) {}
+	FJsonValue::FJsonValue(int64_t In) : Type(EType::Int), IntValue(In) {}
+	FJsonValue::FJsonValue(double In) : Type(EType::Double), DoubleValue(In) {}
+	FJsonValue::FJsonValue(const char* In) : Type(EType::String), StringValue(In ? In : "") {}
+	FJsonValue::FJsonValue(std::string In) : Type(EType::String), StringValue(std::move(In)) {}
+	FJsonValue::FJsonValue(FJsonArray In) : Type(EType::Array), ArrayValue(std::move(In)) {}
+
+	FJsonValue::FJsonValue(const FJsonObjectMap& In) : Type(EType::Object)
+	{
+		// The map is already sorted by key, so this preserves the invariant without a re-sort.
+		ObjectMembers.reserve(In.size());
+		for (const auto& Pair : In)
+		{
+			ObjectMembers.push_back(FJsonMember{Pair.first, Pair.second});
+		}
+	}
+
+	FJsonValue::FJsonValue(const FJsonValue& Other) = default;
+	FJsonValue::FJsonValue(FJsonValue&& Other) noexcept = default;
+	FJsonValue& FJsonValue::operator=(const FJsonValue& Other) = default;
+	FJsonValue& FJsonValue::operator=(FJsonValue&& Other) noexcept = default;
+	FJsonValue::~FJsonValue() = default;
+
+	FJsonValue FJsonValue::Object()
+	{
+		FJsonValue Value;
+		Value.Type = EType::Object;
+		return Value;
+	}
+
+	FJsonValue FJsonValue::Array()
+	{
+		return FJsonValue(FJsonArray{});
 	}
 
 	int64_t FJsonValue::AsInt(int64_t Fallback) const
@@ -420,9 +483,9 @@ namespace Prax
 		return Type == EType::Array ? ArrayValue : EmptyArray;
 	}
 
-	const FJsonObjectMap& FJsonValue::AsObject() const
+	const std::vector<FJsonMember>& FJsonValue::AsObject() const
 	{
-		return Type == EType::Object ? ObjectValue : EmptyObject;
+		return Type == EType::Object ? ObjectMembers : EmptyMembers;
 	}
 
 	FJsonArray& FJsonValue::MutableArray()
@@ -434,33 +497,44 @@ namespace Prax
 		return ArrayValue;
 	}
 
-	FJsonObjectMap& FJsonValue::MutableObject()
-	{
-		if (Type != EType::Object)
-		{
-			*this = FJsonValue(FJsonObjectMap{});
-		}
-		return ObjectValue;
-	}
-
 	const FJsonValue& FJsonValue::Field(const std::string& Key) const
 	{
 		if (Type != EType::Object)
 		{
-			return NullValue;
+			return NullValue();
 		}
-		const auto It = ObjectValue.find(Key);
-		return It == ObjectValue.end() ? NullValue : It->second;
+		// Members are sorted, so this is a binary search rather than a scan.
+		const auto It = std::lower_bound(ObjectMembers.begin(), ObjectMembers.end(), Key, MemberLess);
+		if (It == ObjectMembers.end() || It->Key != Key)
+		{
+			return NullValue();
+		}
+		return It->Value;
 	}
 
 	bool FJsonValue::HasField(const std::string& Key) const
 	{
-		return Type == EType::Object && ObjectValue.find(Key) != ObjectValue.end();
+		if (Type != EType::Object)
+		{
+			return false;
+		}
+		const auto It = std::lower_bound(ObjectMembers.begin(), ObjectMembers.end(), Key, MemberLess);
+		return It != ObjectMembers.end() && It->Key == Key;
 	}
 
 	void FJsonValue::SetField(const std::string& Key, FJsonValue Value)
 	{
-		MutableObject()[Key] = std::move(Value);
+		if (Type != EType::Object)
+		{
+			*this = Object();
+		}
+		const auto It = std::lower_bound(ObjectMembers.begin(), ObjectMembers.end(), Key, MemberLess);
+		if (It != ObjectMembers.end() && It->Key == Key)
+		{
+			It->Value = std::move(Value);
+			return;
+		}
+		ObjectMembers.insert(It, FJsonMember{Key, std::move(Value)});
 	}
 
 	void FJsonValue::Push(FJsonValue Value)
@@ -482,7 +556,8 @@ namespace Prax
 		case EType::Double: return DoubleValue == Other.DoubleValue;
 		case EType::String: return StringValue == Other.StringValue;
 		case EType::Array:  return ArrayValue == Other.ArrayValue;
-		case EType::Object: return ObjectValue == Other.ObjectValue;
+		// Both sides are sorted by key, so element-wise comparison is order-independent in effect.
+		case EType::Object: return ObjectMembers == Other.ObjectMembers;
 		}
 		return false;
 	}
@@ -539,18 +614,18 @@ namespace Prax
 		}
 		case EType::Object:
 		{
-			// An object, always - never an array of {"Key":..,"Value":..} pairs. std::map is a
-			// sequence of pairs as well as a mapping, which is exactly the ambiguity that produces
-			// that bug in other languages, so this is spelled out rather than delegated.
+			// An object, always - never an array of {"Key":..,"Value":..} pairs. The storage IS a
+			// vector of pairs now, which makes that mistake one wrong branch away, so it is spelled
+			// out here and asserted in the suite.
 			Out.push_back('{');
 			bool bFirst = true;
-			for (const auto& Pair : ObjectValue)
+			for (const FJsonMember& Member : ObjectMembers)
 			{
 				if (!bFirst) { Out.push_back(','); }
 				bFirst = false;
-				Out += EscapeJsonString(Pair.first);
+				Out += EscapeJsonString(Member.Key);
 				Out.push_back(':');
-				Pair.second.Serialise(Out);
+				Member.Value.Serialise(Out);
 			}
 			Out.push_back('}');
 			break;

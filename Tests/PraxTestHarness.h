@@ -54,9 +54,15 @@ namespace PraxTest
 	}
 
 	inline std::string Quote(const std::string& In) { return "\"" + In + "\""; }
+
+	// A template for the numeric types rather than one overload per width. int64_t is `long` on
+	// Linux and `long long` on Windows, so a hand-written overload set is ambiguous on one platform
+	// or the other - which is exactly what the first CI run caught. std::to_string covers every
+	// arithmetic type, and the non-template overloads below win the tiebreak on an exact match.
+	template <typename T>
+	inline std::string Show(const T& In) { return std::to_string(In); }
+
 	inline std::string Show(bool In) { return In ? "true" : "false"; }
-	inline std::string Show(long long In) { return std::to_string(In); }
-	inline std::string Show(double In) { return std::to_string(In); }
 	inline std::string Show(const std::string& In) { return Quote(In); }
 	inline std::string Show(const char* In) { return Quote(In ? In : "(null)"); }
 

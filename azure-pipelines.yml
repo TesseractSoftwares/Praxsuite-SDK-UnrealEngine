@@ -227,3 +227,217 @@ stages:
             echo "No secret keys found."
           displayName: 'Scan for leaked secret keys'
           condition: succeededOrFailed()
+
+# ─────────────────────────────────────────────────────────────────────────────
+- stage: Publish
+  displayName: 'Package and mirror to GitHub'
+  dependsOn: Validate
+  condition: and(succeeded(), eq(variables.isMaster, true))
+  jobs:
+    - job: Publish
+      steps:
+        # Full history: the mirror push needs real commits, not a shallow clone.
+        - checkout: self
+          fetchDepth: 0
+          persistCredentials: true
+
+        - task: AzureKeyVault@2
+          displayName: 'Read GitHub token'
+          inputs:
+            azureSubscription: 'sc-acr-push-core-prod'
+            KeyVaultName: 'prax-cicd-kv'
+            SecretsFilter: 'GITHUB-SDK-MIRROR-TOKEN'
+            RunAsPreJob: false
+
+        # Praxsuite.uplugin is the single source of truth for the version, so a release tag can never
+        # disagree with what the editor shows the user in the plugin browser.
+        - script: |
+            set -e
+            VERSION=$(grep -m1 '"VersionName"' Praxsuite.uplugin | cut -d'"' -f4)
+            if [ -z "$VERSION" ]; then
+              echo "##vso[task.logissue type=error]No VersionName in Praxsuite.uplugin."
+              exit 1
+            fi
+            echo "Plugin version: $VERSION"
+            echo "##vso[task.setvariable variable=pkgVersion]$VERSION"
+          displayName: 'Read plugin version'
+
+        # A plugin zip a consumer can drop into Plugins/ and have work. Staged so the exclusions are
+        # applied by the copy rather than by archiver flags - an earlier sibling SDK's packaging
+        # broke because a multi-line exclude list inside a YAML block scalar stopped being valid YAML.
+        #
+        # Tests/ is excluded: nobody consuming the plugin needs the suite, and shipping it would put
+        # key-shaped fixture strings into everyone's project for their own secret scanners to find.
+        - script: |
+            set -e
+            OUT="$(Build.ArtifactStagingDirectory)/package"
+            mkdir -p "$OUT"
+            PKG="$OUT/praxsuite-unreal-$(pkgVersion).zip"
+
+            STAGE=$(mktemp -d)
+            mkdir -p "$STAGE/Praxsuite"
+            cp Praxsuite.uplugin "$STAGE/Praxsuite/"
+            cp README.md CHANGELOG.md LICENSE "$STAGE/Praxsuite/"
+            cp -r Source "$STAGE/Praxsuite/Source"
+            cp -r Resources "$STAGE/Praxsuite/Resources" 2>/dev/null || true
+
+            (cd "$STAGE" && zip -qr "$PKG" Praxsuite) \
+              || (cd "$STAGE" && python3 -m zipfile -c "$PKG" Praxsuite)
+
+            rm -rf "$STAGE"
+            ls -la "$OUT"
+          displayName: 'Package the plugin'
+
+        # An artifact that exists is not an artifact that works. A sibling SDK published a 7 KB npm
+        # tarball containing no code, and every gate in that pipeline passed because each one checked
+        # that the artifact was PRESENT rather than that it contained anything.
+        - script: |
+            set -e
+            PKG="$(Build.ArtifactStagingDirectory)/package/praxsuite-unreal-$(pkgVersion).zip"
+            test -f "$PKG" || { echo "##vso[task.logissue type=error]No package produced."; exit 1; }
+
+            SOURCES=$(unzip -l "$PKG" | grep -cE '\.(cpp|h)$' || true)
+            echo "$PKG carries $SOURCES source files."
+            if [ "$SOURCES" -lt 20 ]; then
+              echo "##vso[task.logissue type=error]The package does not contain the SDK. Contents:"
+              unzip -l "$PKG"
+              exit 1
+            fi
+
+            # Four things whose absence would produce a plugin that looks installable and is not.
+            for REQUIRED in \
+              "Praxsuite/Praxsuite.uplugin" \
+              "Praxsuite/Source/Praxsuite/Praxsuite.Build.cs" \
+              "Praxsuite/Source/Praxsuite/Public/PraxsuiteSubsystem.h" \
+              "Praxsuite/Source/Praxsuite/Private/Core/PraxJson.cpp" \
+              "Praxsuite/LICENSE" ; do
+              if ! unzip -l "$PKG" | grep -q "$REQUIRED"; then
+                echo "##vso[task.logissue type=error]$REQUIRED is missing from the package."
+                unzip -l "$PKG"
+                exit 1
+              fi
+            done
+
+            # The suite must NOT ship. Its fixtures are key-shaped strings, and a consumer's own
+            # secret scanner finding one in their Plugins folder is a support ticket at best.
+            if unzip -l "$PKG" | grep -qE 'Praxsuite/Tests/'; then
+              echo "##vso[task.logissue type=error]The test suite is in the package. Its fixtures look like credentials to a scanner."
+              exit 1
+            fi
+
+            echo "Package contents verified."
+          displayName: 'Verify the package carries the plugin'
+
+        - task: PublishBuildArtifacts@1
+          displayName: 'Publish the package'
+          inputs:
+            PathtoPublish: '$(Build.ArtifactStagingDirectory)/package'
+            ArtifactName: 'unreal-plugin'
+
+        - script: |
+            set -e
+            git config user.email "ci@tesseractsoftwares.com"
+            git config user.name  "Tesseract CI"
+
+            git remote remove github 2>/dev/null || true
+            git remote add github "https://x-access-token:$(GITHUB-SDK-MIRROR-TOKEN)@github.com/$(githubRepo).git"
+
+            # Read the mirror's head BEFORE fetching. --force-with-lease cannot protect anything if a
+            # fetch runs first: fetching sets the remote-tracking ref to whatever GitHub currently
+            # has, so the lease always matches and the push always wins. That is not hypothetical -
+            # it silently reset commits pushed straight to a sibling SDK's mirror.
+            REMOTE_SHA=$(git ls-remote github refs/heads/master | cut -f1)
+            if [ -n "$REMOTE_SHA" ]; then
+              git fetch github master
+              if ! git merge-base --is-ancestor "$REMOTE_SHA" HEAD; then
+                echo "##vso[task.logissue type=error]github.com/$(githubRepo) is at $REMOTE_SHA, which is not an ancestor of this build. Someone pushed to the mirror directly. Reconcile it - do not overwrite."
+                exit 1
+              fi
+            fi
+
+            echo "Mirroring master to github.com/$(githubRepo)"
+            if ! git push github HEAD:refs/heads/master; then
+              echo "##vso[task.logissue type=error]Mirror push failed. Check the token has contents:write on the mirror."
+              exit 1
+            fi
+            echo "Mirror complete."
+          displayName: 'Mirror source to GitHub'
+
+        # Every call captures the HTTP status and prints GitHub's response when it is not what we
+        # expect. curl -f is deliberately absent: it exits 22 with no message and no body, which cost
+        # three builds on a sibling SDK failing with an empty log.
+        - script: |
+            TAG="v$(pkgVersion)"
+            API="https://api.github.com/repos/$(githubRepo)"
+            AUTH="Authorization: Bearer $(GITHUB-SDK-MIRROR-TOKEN)"
+            OUT="$(Build.ArtifactStagingDirectory)/package"
+
+            CODE=$(curl -sS -o /tmp/existing.json -w '%{http_code}' -H "$AUTH" "$API/releases/tags/$TAG")
+            if [ "$CODE" = "200" ]; then
+              if grep -q '"state": *"uploaded"' /tmp/existing.json; then
+                echo "Release $TAG already exists with an asset attached - nothing to publish."
+                exit 0
+              fi
+              echo "##vso[task.logissue type=error]Release $TAG exists but has no asset attached. Delete it (or attach the asset by hand) and re-run."
+              exit 1
+            fi
+            if [ "$CODE" != "404" ]; then
+              echo "##vso[task.logissue type=error]HTTP $CODE checking whether $TAG exists. GitHub said:"
+              cat /tmp/existing.json; echo
+              exit 1
+            fi
+
+            # No double quotes and no newlines in the notes: escaped quotes here become real quotes
+            # once the shell expands them, and the body stops being valid JSON.
+            NOTES="Copy the Praxsuite folder from the attached zip into your projects Plugins directory, then restart the editor. Unreal 5.3+, Blueprint and C++. See CHANGELOG.md for what changed and README.md for what is tested."
+            CODE=$(curl -sS -o /tmp/release.json -w '%{http_code}' -X POST \
+              -H "$AUTH" -H "Content-Type: application/json" -H "Accept: application/vnd.github+json" \
+              "$API/releases" \
+              -d "{\"tag_name\":\"$TAG\",\"name\":\"Praxsuite SDK for Unreal Engine $(pkgVersion)\",\"body\":\"$NOTES\",\"draft\":false,\"prerelease\":false}")
+            if [ "$CODE" != "201" ]; then
+              echo "##vso[task.logissue type=error]GitHub refused to create release $TAG (HTTP $CODE). It said:"
+              cat /tmp/release.json; echo
+              exit 1
+            fi
+
+            RELEASE_ID=$(grep -o '"id": *[0-9]*' /tmp/release.json | head -1 | tr -dc '0-9')
+            if [ -z "$RELEASE_ID" ]; then
+              echo "##vso[task.logissue type=error]Release $TAG created but its id could not be read from:"
+              cat /tmp/release.json; echo
+              exit 1
+            fi
+            echo "Created release $TAG (id $RELEASE_ID)"
+
+            UPLOADED=0
+            for F in "$OUT"/*.zip; do
+              [ -f "$F" ] || continue
+              # ${F##*/} rather than $(basename ...) - ADO reads $(...) as its own variable syntax
+              # and would pass the text through literally, producing a release with no asset while
+              # the build stayed green.
+              CODE=$(curl -sS -o /tmp/asset.json -w '%{http_code}' -X POST \
+                -H "$AUTH" -H "Content-Type: application/zip" \
+                --data-binary @"$F" \
+                "https://uploads.github.com/repos/$(githubRepo)/releases/$RELEASE_ID/assets?name=${F##*/}")
+              if [ "$CODE" != "201" ]; then
+                echo "##vso[task.logissue type=error]Uploading ${F##*/} returned HTTP $CODE. GitHub said:"
+                cat /tmp/asset.json; echo
+                exit 1
+              fi
+              echo "  uploaded ${F##*/}"
+              UPLOADED=$((UPLOADED + 1))
+            done
+
+            if [ "$UPLOADED" -lt 1 ]; then
+              echo "##vso[task.logissue type=error]No asset uploaded."
+              ls -la "$OUT"
+              exit 1
+            fi
+
+            ATTACHED=$(curl -sS -H "$AUTH" "$API/releases/tags/$TAG" | grep -c '"state": *"uploaded"')
+            if [ "$ATTACHED" -lt 1 ]; then
+              echo "##vso[task.logissue type=error]Release $TAG reports no uploaded asset after $UPLOADED successful uploads."
+              exit 1
+            fi
+
+            echo "Published release $TAG with $ATTACHED asset(s)"
+          displayName: 'Cut GitHub release'

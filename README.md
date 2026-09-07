@@ -288,6 +288,69 @@ make -C Tests
 
 336 checks. `make -C Tests sanitize` re-runs them under ASan and UBSan.
 
+## The Event Bus
+
+Ephemeral realtime between connected players: positions, cursors, "is typing", a lobby. State
+that is *changing*, where losing a message is fine because a newer one is 100ms behind it.
+
+```cpp
+UPraxBusSubsystem* Bus = GetGameInstance()->GetSubsystem<UPraxBusSubsystem>();
+
+Bus->OnBusEvent.AddDynamic(this, &AMyActor::HandleBusEvent);
+Bus->OnPeerLeft.AddDynamic(this, &AMyActor::HandlePeerLeft);
+
+Bus->Join(TEXT("office:hq"), FString());
+Bus->Publish(TEXT("office:hq"), TEXT("move"), TEXT("{\"x\":1,\"y\":2}"));
+```
+
+Everything above is also a Blueprint node, including the delegates - `Join`, `Publish`, `Leave`,
+`JoinSelf`, and `OnBusEvent` / `OnPeerJoined` / `OnPeerLeft` / `OnEvicted` / `OnStateChanged`.
+
+**A topic must exist before anyone can join it.** Declare it once in the portal under
+API Gateway / Event Bus and pick its access rule: open to any signed-in player, gated on a role
+from their token, or gated on a grant on that one bus instance. An undeclared topic is refused -
+which is what stops another project's client squatting in your namespace.
+
+`JoinSelf` is the player's own bus, `user:self`. The server resolves it to their id, so it can
+never address anybody else.
+
+A join replays every peer's retained state through `OnBusEvent`, so a player who arrives late
+sees the world rather than an empty one until somebody moves.
+
+Publish **decisions, not frames**. One message per movement decision rather than one per
+rendered frame: a two-second walk becomes one message instead of a hundred, and the receiver
+interpolates. The rate limit is priced by RECIPIENTS, so a busy room exhausts it far faster than
+an empty one.
+
+Three things about it are not obvious and will bite:
+
+- **Nothing is persisted.** No history, no retry, no delivery to a player who was not connected.
+  The test is one question: *if this is lost, does it matter?* Yes - a purchase, a score, an
+  inventory grant - means a table, and a server-authoritative write at that. No, because a newer
+  one is coming, means the bus.
+- **Payloads are hostile.** The bus relays opaque JSON between *players* and parses none of it,
+  so every server-side check is bypassed. `PayloadJson` reaches you exactly as another player
+  sent it. A position is a hint, never an authority.
+- **You never receive your own event.** Apply your own change locally.
+
+A refused publish - a rate limit, an oversized payload - is logged and dropped rather than
+raised. Losing an ephemeral frame is ordinary, and a game loop that treats it as a failure is
+worse than one that skips a frame.
+
+Reconnects are handled: the socket comes back with backoff and every bus you still want is
+re-joined, because SignalR group membership does not survive a reconnect - a client that only
+reconnects is connected, in no groups, and looks for all the world like a broken server.
+
+It needs a signed-in end user: the hub authenticates with the session token, not with the
+publishable key. The token is read in C++ only and never exposed to Blueprint, for the same
+reason `FPraxSession` hides it - a token in a Blueprint variable ends up in a log, and a
+player's log ends up in a bug report.
+
+The module adds Unreal's own `WebSockets` module as a dependency. That ships with the engine, so
+it costs a consumer nothing, and SignalR cannot run over HTTP.
+
+---
+
 ## API surface
 
 | | |

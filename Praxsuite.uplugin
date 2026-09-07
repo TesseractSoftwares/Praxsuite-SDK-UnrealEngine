@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 1,
-	"VersionName": "1.0.0",
+	"Version": 2,
+	"VersionName": "1.1.0",
 	"FriendlyName": "Praxsuite",
 	"Description": "Backend for your Unreal game - player accounts, saves, leaderboards, inventories and server-authoritative logic. Blueprint and C++.",
 	"Category": "Online Platform",

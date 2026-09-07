@@ -161,6 +161,22 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Praxsuite|Auth")
 	bool IsLoggedIn() const;
 
+	/**
+	 * The session token, for C++ callers only.
+	 *
+	 * Deliberately NOT a UFUNCTION, for the reason FPraxSession gives for hiding it: a token in a
+	 * Blueprint variable gets printed to the log by the next person debugging, and a player's log
+	 * routinely ends up in a public bug report.
+	 *
+	 * The Event Bus needs it because its hub authenticates with the end-user token and a browser
+	 * WebSocket cannot set a header, so the token rides in the connection's query string. See
+	 * Core/PraxBusWire.h SocketUrl.
+	 */
+	FString GetSessionTokenForBus() const;
+
+	/** The host in use, for the Event Bus to build its socket URL from. C++ only. */
+	FString GetGatewayHostForBus() const;
+
 private:
 	/** Holds the transport and the configuration. Opaque so the header pulls in no HTTP types. */
 	TUniquePtr<FPraxsuiteTransport> Transport;

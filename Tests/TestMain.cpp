@@ -17,6 +17,7 @@ void TestEnvelopes();
 void TestFilters();
 void TestQueryBuilder();
 void TestMutations();
+void TestBusWire();
 
 int main()
 {
@@ -37,6 +38,7 @@ int main()
 	TestFilters();
 	TestQueryBuilder();
 	TestMutations();
+	TestBusWire();
 
 	return PraxTest::Report();
 }

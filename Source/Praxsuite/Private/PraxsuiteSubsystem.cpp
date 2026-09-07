@@ -458,6 +458,16 @@ FPraxSession UPraxsuiteSubsystem::GetSession() const
 	return Transport.IsValid() ? Transport->GetSession() : FPraxSession{};
 }
 
+FString UPraxsuiteSubsystem::GetGatewayHostForBus() const
+{
+	return Transport.IsValid() ? Transport->GetGatewayHost() : FString();
+}
+
+FString UPraxsuiteSubsystem::GetSessionTokenForBus() const
+{
+	return Transport.IsValid() ? Transport->GetSessionToken() : FString();
+}
+
 bool UPraxsuiteSubsystem::IsLoggedIn() const
 {
 	return Transport.IsValid() && Transport->IsLoggedIn();

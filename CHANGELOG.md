@@ -55,3 +55,27 @@ the plugin in the editor, and the README says so rather than implying the whole 
 - Blueprint rows carry string values, because a Blueprint map cannot hold a heterogeneous type. Use
   the C++ core for typed access.
 - File upload and download are not exposed yet.
+
+## [1.1.0] - 2026-09-07
+
+### Added
+
+- **`UPraxBusSubsystem` - the Event Bus.** Ephemeral realtime between connected players.
+  `Join`, `Publish`, `Leave`, `JoinSelf`, and the `OnBusEvent`, `OnPeerJoined`, `OnPeerLeft`,
+  `OnEvicted` and `OnStateChanged` delegates, all Blueprint-facing. Reconnects with backoff
+  and re-joins every bus, because SignalR group membership does not survive a reconnect and a
+  client that only reconnects is connected, in no groups, and silent.
+
+  The wire format lives in `Core/PraxBusWire.h`, engine-free like the rest of the core, so
+  the whole protocol is exercised by the offline suite with no engine and no socket. The
+  subsystem is only the socket and the Blueprint surface.
+
+  The module now depends on Unreal's `WebSockets` module. It ships with the engine, so this
+  costs a consumer nothing, and SignalR cannot run over HTTP.
+
+### Not verified
+
+- The engine-side subsystem has **not been compiled**: there is no Unreal install and no C++
+  compiler on the machine this was written on, so not even the portable core was built
+  locally. CI compiles and runs `Tests/` on every commit and will cover `PraxBusWire`; the
+  subsystem needs a real engine build before this is released.

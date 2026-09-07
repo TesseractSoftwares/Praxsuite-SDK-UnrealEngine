@@ -281,7 +281,7 @@ void TestRoutes()
 {
 	using namespace Prax::Routes;
 	const std::string Host = "https://gateway.praxsuite.com";
-	const std::string Ws = "1eb92f32-d628-4656-8c64-cd0d43c9869d";
+	const std::string Ws = "00000000-0000-4000-8000-0000000000ff";
 
 	PraxTest::Section("Routes - the short form");
 	{

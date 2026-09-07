@@ -30,6 +30,12 @@ public:
 	bool IsConfigured() const;
 
 	void SetSession(const FString& InUserId, const FString& InEmail, const FString& InToken);
+
+	/** The raw session token. Only the Event Bus needs it; see the subsystem. */
+	const FString& GetSessionToken() const { return SessionToken; }
+
+	/** The host actually configured, which Configure() may have overridden. */
+	const FString& GetGatewayHost() const { return GatewayHost; }
 	void ClearSession();
 	FPraxSession GetSession() const;
 	bool IsLoggedIn() const;

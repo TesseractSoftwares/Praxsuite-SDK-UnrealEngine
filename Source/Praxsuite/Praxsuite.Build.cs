@@ -42,6 +42,10 @@ public class Praxsuite : ModuleRules
 			// UDeveloperSettings, so workspace configuration lives in Project Settings rather than
 			// being hardcoded in a Blueprint someone forgets to change before shipping.
 			"DeveloperSettings",
+			// The Event Bus. An engine module, not a third-party package - it ships with Unreal,
+			// so declaring it costs a consumer nothing. The bus half of the SDK is otherwise
+			// unreachable: SignalR runs over a WebSocket and HTTP cannot carry it.
+			"WebSockets",
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]
